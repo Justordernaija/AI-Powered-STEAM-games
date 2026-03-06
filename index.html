@@ -426,22 +426,41 @@ async function fetchQuestion(isBaseline) {
   const s = SUBJECTS[state.subject];
   const levelHint = isBaseline ? "baseline (could be beginner, intermediate, or advanced)" 
     : `${state.learnerLevel} level`;
-  const previousContext = state.questions.length 
-    ? `Previous topic areas covered: ${state.questions.map(q=>q.topic||'').join(', ')}.` : '';
 
-  const prompt = `You are a friendly STEM educator for students in underserved communities in Nigeria (ages 10-16).
-Generate a ${isBaseline ? 'BASELINE' : levelHint} multiple-choice question about ${s.name}.
-${isBaseline ? 'The baseline question should be moderately challenging to gauge the student level.' : ''}
-${previousContext}
-Question number: ${state.questionIndex + 1} of ${state.totalQuestions}
+  // Build a full history block so the AI knows EXACTLY what was already asked
+  const askedBlock = state.questions.length
+    ? `\n\nQUESTIONS ALREADY ASKED (DO NOT repeat, rephrase, or ask about the same concept):\n` +
+      state.questions.map((q, i) => `${i+1}. [Topic: ${q.topic}] "${q.question}"`).join('\n')
+    : '';
 
-Return ONLY valid JSON (no markdown, no explanation):
+  // Build a broad list of possible topics so the AI picks a FRESH one
+  const topicsUsed = state.questions.map(q => q.topic).filter(Boolean);
+  const avoidTopics = topicsUsed.length 
+    ? `\nTopics already covered (pick something DIFFERENT): ${topicsUsed.join(', ')}` 
+    : '';
+
+  const prompt = `You are a friendly STEM educator for Nigerian secondary school students (ages 10-16) in underserved communities.
+
+Generate ONE ${isBaseline ? 'BASELINE' : levelHint} multiple-choice question about ${s.name}.
+${isBaseline ? 'The baseline question should be moderately challenging — not too easy, not too hard — to accurately gauge the student\'s level.' : `Difficulty: ${state.learnerLevel}. Make it appropriate for that level.`}
+${avoidTopics}
+${askedBlock}
+
+STRICT RULES:
+1. The question MUST be on a completely NEW topic not listed above.
+2. Do NOT rephrase, reword, or ask about the same concept as any previous question.
+3. Do NOT repeat any answer options or correct answers from previous questions.
+4. Each question must test a different skill or concept within ${s.name}.
+5. Make the question clear, engaging and relatable to a Nigerian student's everyday life where possible.
+6. Vary the question style: sometimes ask for definitions, sometimes calculations, sometimes real-world application, sometimes "which of these is true/false".
+
+Return ONLY valid JSON (no markdown, no backticks, no explanation — just the raw JSON object):
 {
   "question": "...",
   "options": ["A. ...", "B. ...", "C. ...", "D. ..."],
   "correct": "A",
-  "explanation": "Brief, encouraging explanation (1-2 sentences)",
-  "topic": "brief topic name",
+  "explanation": "Brief, encouraging explanation (1-2 sentences). Mention WHY the correct answer is right.",
+  "topic": "specific topic name (e.g. 'photosynthesis', 'algebra', 'circuits')",
   "difficulty": "beginner|intermediate|advanced"
 }`;
 
@@ -463,8 +482,9 @@ Return ONLY valid JSON (no markdown, no explanation):
     if (isBaseline) state.learnerLevel = q.difficulty;
     renderQuestion(q, isBaseline);
   } catch(e) {
-    // Fallback question
-    const fallback = getFallback(state.subject, isBaseline ? 'intermediate' : state.learnerLevel);
+    // Fallback — pick one not already used
+    const usedTopics = state.questions.map(q => q.topic);
+    const fallback = getFallback(state.subject, isBaseline ? 'intermediate' : state.learnerLevel, usedTopics);
     state.questions.push(fallback);
     if (isBaseline) state.learnerLevel = fallback.difficulty;
     renderQuestion(fallback, isBaseline);
@@ -603,42 +623,122 @@ function resetGame() {
   showScreen('screen-roll');
 }
 
-/* ---- FALLBACK QUESTIONS ---- */
-function getFallback(subj, level) {
-  const fallbacks = {
+/* ---- FALLBACK QUESTIONS (large rotating bank) ---- */
+function getFallback(subj, level, usedTopics = []) {
+  const banks = {
     S: {
-      beginner:     { question:"What do plants need to make their own food?", options:["A. Sunlight, water and air","B. Sunlight and soil only","C. Water and darkness","D. Soil and stones"], correct:"A", explanation:"Plants use sunlight, water and carbon dioxide (from air) to make food through photosynthesis.", topic:"photosynthesis", difficulty:"beginner" },
-      intermediate: { question:"What is the role of the mitochondria in a cell?", options:["A. Controls cell activities","B. Produces energy from food","C. Makes proteins","D. Stores water"], correct:"B", explanation:"Mitochondria break down glucose to produce energy (ATP) — they're the 'powerhouse' of the cell!", topic:"cell biology", difficulty:"intermediate" },
-      advanced:     { question:"Which gas is released during aerobic respiration?", options:["A. Oxygen","B. Nitrogen","C. Carbon dioxide","D. Hydrogen"], correct:"C", explanation:"Aerobic respiration breaks down glucose using oxygen and releases carbon dioxide and water as by-products.", topic:"respiration", difficulty:"advanced" }
+      beginner: [
+        { question:"What do plants need to make their own food?", options:["A. Sunlight, water and air","B. Sunlight and soil only","C. Water and darkness","D. Soil and stones"], correct:"A", explanation:"Plants use sunlight, water and carbon dioxide to make food through photosynthesis.", topic:"photosynthesis", difficulty:"beginner" },
+        { question:"Which organ pumps blood around the human body?", options:["A. Lungs","B. Kidney","C. Heart","D. Liver"], correct:"C", explanation:"The heart is a muscle that pumps blood through your blood vessels to all parts of your body.", topic:"human body", difficulty:"beginner" },
+        { question:"What state of matter is water at room temperature?", options:["A. Solid","B. Gas","C. Plasma","D. Liquid"], correct:"D", explanation:"At room temperature, water is a liquid. It becomes solid (ice) when frozen and gas (steam) when boiled.", topic:"states of matter", difficulty:"beginner" },
+        { question:"Which of these animals is a mammal?", options:["A. Lizard","B. Eagle","C. Dolphin","D. Frog"], correct:"C", explanation:"Dolphins are mammals — they breathe air, are warm-blooded, and feed their young with milk.", topic:"animal classification", difficulty:"beginner" },
+        { question:"What is the main gas in the air we breathe?", options:["A. Oxygen","B. Carbon dioxide","C. Nitrogen","D. Hydrogen"], correct:"C", explanation:"Air is about 78% nitrogen and only 21% oxygen — though oxygen is what we actually need to survive!", topic:"atmosphere", difficulty:"beginner" }
+      ],
+      intermediate: [
+        { question:"What is the role of the mitochondria in a cell?", options:["A. Controls cell activities","B. Produces energy from food","C. Makes proteins","D. Stores water"], correct:"B", explanation:"Mitochondria break down glucose to produce energy (ATP) — they're the 'powerhouse' of the cell!", topic:"cell biology", difficulty:"intermediate" },
+        { question:"What happens during evaporation?", options:["A. Liquid turns to solid","B. Gas turns to liquid","C. Liquid turns to gas","D. Solid turns to liquid"], correct:"C", explanation:"Evaporation is when a liquid absorbs heat energy and turns into gas — like puddles drying up in sunlight.", topic:"water cycle", difficulty:"intermediate" },
+        { question:"What is the function of white blood cells?", options:["A. Carry oxygen","B. Fight infection","C. Clot blood","D. Transport food"], correct:"B", explanation:"White blood cells are the body's defence force — they identify and destroy bacteria, viruses and other germs.", topic:"blood", difficulty:"intermediate" },
+        { question:"Which planet is closest to the Sun?", options:["A. Venus","B. Earth","C. Mars","D. Mercury"], correct:"D", explanation:"Mercury is the closest planet to the Sun. Despite this, Venus is actually hotter because of its thick atmosphere!", topic:"solar system", difficulty:"intermediate" },
+        { question:"What is the chemical symbol for water?", options:["A. WA","B. H2O","C. HO2","D. W2O"], correct:"B", explanation:"H2O means two hydrogen atoms bonded to one oxygen atom — that's every water molecule!", topic:"chemistry basics", difficulty:"intermediate" }
+      ],
+      advanced: [
+        { question:"Which gas is released during aerobic respiration?", options:["A. Oxygen","B. Nitrogen","C. Carbon dioxide","D. Hydrogen"], correct:"C", explanation:"Aerobic respiration: glucose + oxygen → carbon dioxide + water + energy (ATP).", topic:"respiration", difficulty:"advanced" },
+        { question:"What is the pH of a neutral solution?", options:["A. 0","B. 7","C. 14","D. 5"], correct:"B", explanation:"pH 7 is neutral. Below 7 is acidic (like lemon juice), above 7 is alkaline (like baking soda).", topic:"acids and bases", difficulty:"advanced" },
+        { question:"Which part of the brain controls balance and coordination?", options:["A. Cerebrum","B. Medulla","C. Cerebellum","D. Thalamus"], correct:"C", explanation:"The cerebellum coordinates movement and balance — it processes signals from muscles and the inner ear.", topic:"neuroscience", difficulty:"advanced" },
+        { question:"What is Newton's Second Law of Motion?", options:["A. Every action has an equal reaction","B. Force equals mass times acceleration","C. Objects at rest stay at rest","D. Energy cannot be created or destroyed"], correct:"B", explanation:"F = ma. The greater the force on a mass, the greater its acceleration!", topic:"forces and motion", difficulty:"advanced" }
+      ]
     },
     T: {
-      beginner:     { question:"What does a computer mouse do?", options:["A. Stores data","B. Controls cursor on screen","C. Plays sound","D. Prints documents"], correct:"B", explanation:"A mouse is an input device that moves the cursor on your computer screen.", topic:"computer basics", difficulty:"beginner" },
-      intermediate: { question:"What does HTML stand for?", options:["A. Hyper Text Making Language","B. High Transfer Markup Language","C. Hyper Text Markup Language","D. Home Tool Making Language"], correct:"C", explanation:"HTML (HyperText Markup Language) is the standard language used to create web pages.", topic:"web technology", difficulty:"intermediate" },
-      advanced:     { question:"What is an algorithm?", options:["A. A type of computer virus","B. Step-by-step instructions to solve a problem","C. A programming language","D. A type of database"], correct:"B", explanation:"An algorithm is a precise, step-by-step set of instructions that tells a computer how to solve a problem.", topic:"computational thinking", difficulty:"advanced" }
+      beginner: [
+        { question:"What does a computer mouse do?", options:["A. Stores data","B. Controls cursor on screen","C. Plays sound","D. Prints documents"], correct:"B", explanation:"A mouse is an input device that moves the cursor on your screen.", topic:"computer basics", difficulty:"beginner" },
+        { question:"Which of these is an INPUT device?", options:["A. Monitor","B. Printer","C. Speaker","D. Keyboard"], correct:"D", explanation:"A keyboard is an input device — it sends data INTO the computer. Monitors and printers are output devices.", topic:"input output devices", difficulty:"beginner" },
+        { question:"What does Wi-Fi allow you to do?", options:["A. Print documents","B. Connect to the internet wirelessly","C. Store files permanently","D. Play CDs"], correct:"B", explanation:"Wi-Fi uses radio waves to connect your device to the internet without needing a cable.", topic:"networking", difficulty:"beginner" },
+        { question:"What is a smartphone?", options:["A. A phone with no internet","B. A camera only","C. A mobile computer with calling features","D. A type of landline phone"], correct:"C", explanation:"A smartphone combines a phone with a powerful computer — it can browse the internet, run apps, take photos and more.", topic:"mobile technology", difficulty:"beginner" }
+      ],
+      intermediate: [
+        { question:"What does HTML stand for?", options:["A. Hyper Text Making Language","B. High Transfer Markup Language","C. Hyper Text Markup Language","D. Home Tool Making Language"], correct:"C", explanation:"HTML is the standard language used to create web pages.", topic:"web technology", difficulty:"intermediate" },
+        { question:"What is the purpose of a password?", options:["A. Speed up your device","B. Protect access to your account","C. Download files faster","D. Connect to Wi-Fi"], correct:"B", explanation:"Passwords protect your accounts — always keep them secret and strong!", topic:"cybersecurity", difficulty:"intermediate" },
+        { question:"What does CPU stand for?", options:["A. Computer Processing Unit","B. Central Power Unit","C. Central Processing Unit","D. Core Program Utility"], correct:"C", explanation:"The CPU is the brain of the computer — it carries out all instructions from programs.", topic:"computer hardware", difficulty:"intermediate" },
+        { question:"Which of these is a programming language?", options:["A. Google","B. Python","C. Excel","D. Windows"], correct:"B", explanation:"Python is a popular programming language used for websites, data science, and AI!", topic:"programming", difficulty:"intermediate" }
+      ],
+      advanced: [
+        { question:"What is an algorithm?", options:["A. A type of computer virus","B. Step-by-step instructions to solve a problem","C. A programming language","D. A type of database"], correct:"B", explanation:"An algorithm is a precise, ordered set of instructions — every program is built on algorithms.", topic:"computational thinking", difficulty:"advanced" },
+        { question:"What does 'binary' mean in computing?", options:["A. Two programming languages","B. A system using only 0s and 1s","C. Double processing speed","D. A type of network"], correct:"B", explanation:"Computers use binary — every piece of data is represented as 0s and 1s (off/on signals).", topic:"binary systems", difficulty:"advanced" },
+        { question:"What is artificial intelligence?", options:["A. Robots that look human","B. Machines that simulate human intelligence","C. Very fast internet","D. 3D printing technology"], correct:"B", explanation:"AI enables machines to perform tasks requiring human intelligence — like speech recognition or decision-making.", topic:"artificial intelligence", difficulty:"advanced" }
+      ]
     },
     E: {
-      beginner:     { question:"What material is best for building a strong bridge?", options:["A. Paper","B. Cotton","C. Steel","D. Leaves"], correct:"C", explanation:"Steel is strong, durable and flexible — ideal for building bridges that carry heavy loads.", topic:"materials", difficulty:"beginner" },
-      intermediate: { question:"What is the purpose of a circuit breaker?", options:["A. Increase power","B. Store electricity","C. Protect from electrical overload","D. Convert AC to DC"], correct:"C", explanation:"Circuit breakers automatically switch off to prevent damage when too much current flows in a circuit.", topic:"electrical engineering", difficulty:"intermediate" },
-      advanced:     { question:"Which engineering principle helps aeroplanes fly?", options:["A. Pascal's Law","B. Bernoulli's Principle","C. Ohm's Law","D. Archimedes' Principle"], correct:"B", explanation:"Bernoulli's Principle states that faster-moving air has lower pressure — this creates lift under aircraft wings.", topic:"aerodynamics", difficulty:"advanced" }
+      beginner: [
+        { question:"What material is best for building a strong bridge?", options:["A. Paper","B. Cotton","C. Steel","D. Leaves"], correct:"C", explanation:"Steel is strong, durable and flexible — ideal for bridges carrying heavy loads.", topic:"materials", difficulty:"beginner" },
+        { question:"What does a wheel and axle help you do?", options:["A. Generate electricity","B. Move objects more easily","C. Heat water","D. Store energy"], correct:"B", explanation:"A wheel and axle is a simple machine that makes it easier to move or lift objects — used in bicycles and cars!", topic:"simple machines", difficulty:"beginner" },
+        { question:"Why do engineers test their designs?", options:["A. To make designs look prettier","B. To find and fix problems before use","C. To make them more expensive","D. To impress customers"], correct:"B", explanation:"Testing reveals weaknesses and allows improvements before the product is used for real.", topic:"design process", difficulty:"beginner" }
+      ],
+      intermediate: [
+        { question:"What is the purpose of a circuit breaker?", options:["A. Increase power","B. Store electricity","C. Protect from electrical overload","D. Convert AC to DC"], correct:"C", explanation:"Circuit breakers switch off automatically to prevent damage when too much current flows.", topic:"electrical engineering", difficulty:"intermediate" },
+        { question:"What does a gear do in a machine?", options:["A. Store fuel","B. Change speed or force","C. Generate electricity","D. Filter liquids"], correct:"B", explanation:"Gears change speed and direction — small gears turn fast, large gears turn slow but with more force.", topic:"mechanical engineering", difficulty:"intermediate" },
+        { question:"Which material is the best conductor of heat?", options:["A. Wood","B. Plastic","C. Copper","D. Rubber"], correct:"C", explanation:"Copper is an excellent conductor of heat and electricity — that's why pots and wires are often made from it.", topic:"thermal properties", difficulty:"intermediate" }
+      ],
+      advanced: [
+        { question:"Which engineering principle helps aeroplanes fly?", options:["A. Pascal's Law","B. Bernoulli's Principle","C. Ohm's Law","D. Archimedes' Principle"], correct:"B", explanation:"Bernoulli's Principle: faster-moving air has lower pressure — creating lift under aircraft wings.", topic:"aerodynamics", difficulty:"advanced" },
+        { question:"What does Ohm's Law state?", options:["A. Power = Current × Time","B. Voltage = Current × Resistance","C. Force = Mass × Acceleration","D. Energy = Mass × Speed²"], correct:"B", explanation:"Ohm's Law: V = IR. Fundamental to all electrical circuit design.", topic:"Ohm's Law", difficulty:"advanced" }
+      ]
     },
     A: {
-      beginner:     { question:"Which of these is a PRIMARY colour?", options:["A. Green","B. Orange","C. Blue","D. Purple"], correct:"C", explanation:"The three primary colours are red, yellow, and blue — all other colours are made by mixing these!", topic:"colour theory", difficulty:"beginner" },
-      intermediate: { question:"What is 'perspective' in art?", options:["A. Mixing colours together","B. Making distant objects look smaller","C. Adding texture to a drawing","D. Using dark outlines"], correct:"B", explanation:"Perspective is a technique that makes art look 3D by drawing objects smaller as they get farther away.", topic:"art techniques", difficulty:"intermediate" },
-      advanced:     { question:"Which art movement was Pablo Picasso known for?", options:["A. Impressionism","B. Surrealism","C. Cubism","D. Realism"], correct:"C", explanation:"Picasso co-founded Cubism, which breaks objects into geometric shapes shown from multiple viewpoints at once.", topic:"art history", difficulty:"advanced" }
+      beginner: [
+        { question:"Which of these is a PRIMARY colour?", options:["A. Green","B. Orange","C. Blue","D. Purple"], correct:"C", explanation:"Red, yellow, and blue are the three primary colours — all others are made by mixing these!", topic:"colour theory", difficulty:"beginner" },
+        { question:"What do you call a picture made by sticking pieces of paper together?", options:["A. Sculpture","B. Collage","C. Sketch","D. Mosaic"], correct:"B", explanation:"A collage is artwork created by assembling different materials onto a surface.", topic:"art forms", difficulty:"beginner" },
+        { question:"Which of these is a percussion instrument?", options:["A. Flute","B. Guitar","C. Drum","D. Violin"], correct:"C", explanation:"Percussion instruments make sound by being struck or shaken — drums and xylophones are examples.", topic:"music", difficulty:"beginner" }
+      ],
+      intermediate: [
+        { question:"What is 'perspective' in art?", options:["A. Mixing colours together","B. Making distant objects look smaller","C. Adding texture to a drawing","D. Using dark outlines"], correct:"B", explanation:"Perspective creates the illusion of depth — objects appear smaller the further away they are.", topic:"art techniques", difficulty:"intermediate" },
+        { question:"What is the difference between rhythm and beat in music?", options:["A. They are the same thing","B. Beat is steady pulse; rhythm is the pattern of long and short sounds","C. Rhythm is louder than beat","D. Beat changes constantly; rhythm stays the same"], correct:"B", explanation:"Beat is the steady pulse while rhythm is the pattern of notes played over that pulse.", topic:"music theory", difficulty:"intermediate" }
+      ],
+      advanced: [
+        { question:"Which art movement was Pablo Picasso known for?", options:["A. Impressionism","B. Surrealism","C. Cubism","D. Realism"], correct:"C", explanation:"Picasso co-founded Cubism — breaking objects into geometric shapes and showing multiple viewpoints at once.", topic:"art history", difficulty:"advanced" },
+        { question:"What is 'chiaroscuro' in art?", options:["A. A type of sculpture","B. The use of light and shadow to create depth","C. A painting style using only blue","D. Abstract geometric patterns"], correct:"B", explanation:"Chiaroscuro (Italian for 'light-dark') creates dramatic depth — used masterfully by Leonardo da Vinci.", topic:"art techniques advanced", difficulty:"advanced" }
+      ]
     },
     M: {
-      beginner:     { question:"What is 7 × 8?", options:["A. 54","B. 56","C. 63","D. 48"], correct:"B", explanation:"7 × 8 = 56. You can remember it as '5-6-7-8' — 56 = 7 × 8!", topic:"multiplication", difficulty:"beginner" },
-      intermediate: { question:"What is the area of a rectangle with length 8cm and width 5cm?", options:["A. 13cm²","B. 26cm²","C. 40cm²","D. 45cm²"], correct:"C", explanation:"Area = length × width = 8 × 5 = 40cm². Always multiply the two dimensions!", topic:"geometry", difficulty:"intermediate" },
-      advanced:     { question:"Solve for x: 3x + 7 = 22", options:["A. x = 3","B. x = 4","C. x = 5","D. x = 6"], correct:"C", explanation:"Subtract 7 from both sides: 3x = 15. Then divide by 3: x = 5. Always do the same to both sides!", topic:"algebra", difficulty:"advanced" }
+      beginner: [
+        { question:"What is 7 × 8?", options:["A. 54","B. 56","C. 63","D. 48"], correct:"B", explanation:"7 × 8 = 56. Memory trick: 5-6-7-8 → 56 = 7 × 8!", topic:"multiplication", difficulty:"beginner" },
+        { question:"What fraction is shaded if 3 out of 4 equal parts are coloured?", options:["A. 1/4","B. 3/3","C. 3/4","D. 4/3"], correct:"C", explanation:"3 coloured parts out of 4 total = 3/4 (three-quarters).", topic:"fractions", difficulty:"beginner" },
+        { question:"What is the perimeter of a square with sides of 5cm?", options:["A. 10cm","B. 25cm","C. 15cm","D. 20cm"], correct:"D", explanation:"Perimeter = total distance around. A square has 4 equal sides: 4 × 5cm = 20cm.", topic:"perimeter", difficulty:"beginner" },
+        { question:"What is 15% of 200?", options:["A. 20","B. 25","C. 30","D. 35"], correct:"C", explanation:"15% of 200 = 0.15 × 200 = 30. Percentages are just fractions out of 100!", topic:"percentages", difficulty:"beginner" }
+      ],
+      intermediate: [
+        { question:"What is the area of a rectangle with length 8cm and width 5cm?", options:["A. 13cm²","B. 26cm²","C. 40cm²","D. 45cm²"], correct:"C", explanation:"Area = length × width = 8 × 5 = 40cm².", topic:"area", difficulty:"intermediate" },
+        { question:"What is the value of 2³?", options:["A. 6","B. 5","C. 9","D. 8"], correct:"D", explanation:"2³ means 2 × 2 × 2 = 8. Indices tell you how many times to multiply a number by itself.", topic:"indices", difficulty:"intermediate" },
+        { question:"If a triangle has angles of 60° and 80°, what is the third angle?", options:["A. 30°","B. 40°","C. 50°","D. 60°"], correct:"B", explanation:"Angles in a triangle add up to 180°. So: 180 − 60 − 80 = 40°.", topic:"angles", difficulty:"intermediate" },
+        { question:"What is the mean of 4, 7, 9, 10, 10?", options:["A. 7","B. 8","C. 9","D. 10"], correct:"B", explanation:"Mean = sum ÷ count = (4+7+9+10+10) ÷ 5 = 40 ÷ 5 = 8.", topic:"statistics", difficulty:"intermediate" }
+      ],
+      advanced: [
+        { question:"Solve for x: 3x + 7 = 22", options:["A. x = 3","B. x = 4","C. x = 5","D. x = 6"], correct:"C", explanation:"Subtract 7: 3x = 15. Divide by 3: x = 5. Always do the same to both sides!", topic:"algebra", difficulty:"advanced" },
+        { question:"What is the gradient of a line through (0,2) and (4,10)?", options:["A. 1","B. 2","C. 3","D. 4"], correct:"B", explanation:"Gradient = (y2-y1)÷(x2-x1) = (10-2)÷(4-0) = 8÷4 = 2.", topic:"coordinate geometry", difficulty:"advanced" },
+        { question:"Factorise: x² + 5x + 6", options:["A. (x+2)(x+3)","B. (x+1)(x+6)","C. (x+2)(x+4)","D. (x+3)(x+3)"], correct:"A", explanation:"Find two numbers that multiply to 6 and add to 5: 2 and 3. So x² + 5x + 6 = (x+2)(x+3).", topic:"factorisation", difficulty:"advanced" }
+      ]
     },
     STEAM: {
-      beginner:     { question:"Which of these is a living thing?", options:["A. Rock","B. Water","C. Mushroom","D. Sand"], correct:"C", explanation:"Mushrooms are living organisms — they grow, reproduce and respond to their environment!", topic:"life science", difficulty:"beginner" },
-      intermediate: { question:"What does a sensor do in an Arduino project?", options:["A. Powers the device","B. Detects changes in the environment","C. Stores the program","D. Displays images"], correct:"B", explanation:"Sensors detect physical changes (like temperature, light, or movement) and send data to the microcontroller.", topic:"Arduino/STEAM", difficulty:"intermediate" },
-      advanced:     { question:"In a solar panel system, which energy conversion happens?", options:["A. Thermal → Electrical","B. Chemical → Kinetic","C. Light → Electrical","D. Mechanical → Thermal"], correct:"C", explanation:"Solar panels (photovoltaic cells) convert light energy from the sun directly into electrical energy.", topic:"energy systems", difficulty:"advanced" }
+      beginner: [
+        { question:"Which of these is a living thing?", options:["A. Rock","B. Water","C. Mushroom","D. Sand"], correct:"C", explanation:"Mushrooms are living organisms — they grow, reproduce and respond to their environment.", topic:"life science", difficulty:"beginner" },
+        { question:"What does a solar panel do?", options:["A. Stores rainwater","B. Converts sunlight to electricity","C. Cools buildings","D. Filters air"], correct:"B", explanation:"Solar panels convert sunlight directly into electricity — clean, renewable energy!", topic:"renewable energy", difficulty:"beginner" }
+      ],
+      intermediate: [
+        { question:"What does a sensor do in an Arduino project?", options:["A. Powers the device","B. Detects changes in the environment","C. Stores the program","D. Displays images"], correct:"B", explanation:"Sensors detect physical changes (temperature, light, movement) and send data to the microcontroller.", topic:"Arduino sensors", difficulty:"intermediate" },
+        { question:"In design thinking, what comes FIRST?", options:["A. Build a prototype","B. Test the product","C. Understand the user's problem","D. Write the code"], correct:"C", explanation:"Good design starts with empathy — understanding the real problem before jumping to solutions.", topic:"design thinking", difficulty:"intermediate" }
+      ],
+      advanced: [
+        { question:"In a solar panel system, which energy conversion happens?", options:["A. Thermal → Electrical","B. Chemical → Kinetic","C. Light → Electrical","D. Mechanical → Thermal"], correct:"C", explanation:"Solar panels convert light energy into electrical energy using the photoelectric effect.", topic:"energy conversion", difficulty:"advanced" },
+        { question:"What is machine learning?", options:["A. Teaching robots to walk","B. Computers learning patterns from data without being explicitly programmed","C. Manual data entry by computers","D. A type of computer memory"], correct:"B", explanation:"Machine learning allows computers to learn from examples (data) and improve without being hand-coded for every scenario.", topic:"machine learning", difficulty:"advanced" }
+      ]
     }
   };
-  const subFallbacks = fallbacks[subj] || fallbacks['STEAM'];
-  return subFallbacks[level] || subFallbacks['intermediate'];
+
+  const subBank = banks[subj] || banks['STEAM'];
+  const levelBank = subBank[level] || subBank['intermediate'] || [];
+  // Prefer questions on topics not yet used
+  const unused = levelBank.filter(q => !usedTopics.includes(q.topic));
+  const pool = unused.length > 0 ? unused : levelBank;
+  return pool[Math.floor(Math.random() * pool.length)];
 }
 </script>
 </body>
